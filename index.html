@@ -217,7 +217,7 @@ function initApp() {
         'Content-Type': 'application/json',
         'x-api-key': apiKey
       },
-      body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:1500, system, messages})
+      body: JSON.stringify({model:'claude-sonnet-4-5', max_tokens:1500, system, messages})
     });
     let d;
     try { d = await r.json(); } catch(e) {
