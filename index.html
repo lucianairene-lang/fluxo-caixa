@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fluxo.ai — Fluxo de Caixa</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100vh;background:#0f1117;color:#e8eaf0;font-family:'Syne',system-ui,sans-serif}
+#loading{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px;text-align:center;padding:24px}
+#loading h1{font-size:28px;font-weight:800;color:#fff}#loading h1 span{color:#00e5a0}
+#loading p{color:#6b7280;font-size:13px}
+.spinner{width:36px;height:36px;border:3px solid #2a2f45;border-top-color:#00e5a0;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#err{display:none;background:#ff4d6d18;border:1px solid #ff4d6d40;border-radius:10px;padding:16px;max-width:480px;color:#ff4d6d;font-size:13px;line-height:1.7;margin-top:8px}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="spinner"></div>
+  <h1>fluxo<span>.ai</span></h1>
+  <p id="lmsg">Carregando React...</p>
+  <div id="err"></div>
+</div>
+<div id="root" style="display:none"></div>
+
+<script>
+const lmsg = id => document.getElementById('lmsg').textContent = id;
+const showErr = msg => {
+  const el = document.getElementById('err');
+  el.style.display = 'block';
+  el.innerHTML = '<strong>⚠️ Erro ao carregar</strong><br><br>' + msg + '<br><br>Verifique sua conexão com a internet e recarregue (F5).';
+  document.querySelector('.spinner').style.display = 'none';
+  lmsg('Erro ao carregar.');
+};
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = () => rej(new Error(src));
+    document.head.appendChild(s);
+  });
+}
+
+async function tryLoad(urls) {
+  for (const u of urls) {
+    try { await loadScript(u); return true; } catch(e) {}
+  }
+  return false;
+}
+
+async function boot() {
+  lmsg('Carregando React...');
+  const ok1 = await tryLoad([
+    'https://unpkg.com/react@18/umd/react.production.min.js',
+    'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js'
+  ]);
+  if (!ok1) { showErr('Não foi possível carregar o React.'); return; }
+
+  const ok2 = await tryLoad([
+    'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+    'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js'
+  ]);
+  if (!ok2) { showErr('Não foi possível carregar o ReactDOM.'); return; }
+
+  lmsg('Carregando leitor de PDF...');
+  const ok3 = await tryLoad([
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+    'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'
+  ]);
+  if (ok3 && window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+
+  lmsg('Iniciando app...');
+  try {
+    initApp();
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('root').style.display = 'block';
+  } catch(e) {
+    showErr('Erro ao iniciar: ' + e.message);
+  }
+}
+
+function initApp() {
+  const {useState, useEffect, useRef, useMemo} = React;
+  const e = React.createElement;
+
+  // ── Cores ──
+  const C = {
+    bg:'#0f1117', surface:'#181c27', card:'#1e2333', border:'#2a2f45',
+    accent:'#00e5a0', adim:'#00e5a018', red:'#ff4d6d', rdim:'#ff4d6d18',
+    yellow:'#ffd166', text:'#e8eaf0', muted:'#6b7280', white:'#ffffff'
+  };
+
+  const FORMAS = [
+    {v:'dinheiro',l:'💵 Dinheiro'},{v:'pix',l:'⚡ PIX'},
+    {v:'debito',l:'💳 Débito'},{v:'credito',l:'💳 Crédito'},
+    {v:'transferencia',l:'🏦 Transferência'},{v:'outro',l:'• Outro'}
+  ];
+  const FL = Object.fromEntries(FORMAS.map(f=>[f.v,f.l]));
+  const MESES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const fmt = v => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(v);
+  const fmtD = d => { if(!d)return'—'; const dt=new Date(d+'T12:00:00'); return isNaN(dt)?d:dt.toLocaleDateString('pt-BR'); };
+  const today = () => new Date().toISOString().slice(0,10);
+  const EFORM = {tipo:'saida',data:today(),descricao:'',valor:'',emitente:'',numeroNF:'',forma:'pix',obs:''};
+
+  // ── CSS ──
+  const css = `
+    .apiscreen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:${C.bg};padding:24px}
+    .apicard{background:${C.card};border:1px solid ${C.border};border-radius:18px;padding:36px;max-width:440px;width:100%;text-align:center}
+    .apicard h1{font-size:26px;font-weight:800;color:${C.white};margin-bottom:6px}
+    .apicard h1 span{color:${C.accent}}
+    .apicard p{font-size:13px;color:${C.muted};margin-bottom:24px;line-height:1.6}
+    .apicard input{width:100%;background:${C.surface};border:1px solid ${C.border};border-radius:9px;padding:12px 14px;color:${C.text};font-family:'DM Mono',monospace;font-size:13px;outline:none;margin-bottom:12px;transition:border-color .15s}
+    .apicard input:focus{border-color:${C.accent}}
+    .hint{font-size:11px;color:${C.muted};margin-top:12px;line-height:1.6}
+    .hint a{color:${C.accent};text-decoration:none}
+    .topbar{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid ${C.border};background:${C.surface};position:sticky;top:0;z-index:100}
+    .logo{font-size:18px;font-weight:800;color:${C.white}}.logo span{color:${C.accent}}
+    .badge{background:${C.adim};color:${C.accent};border:1px solid #00e5a040;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:600;font-family:'DM Mono',monospace}
+    .main{padding:20px;max-width:1200px;margin:0 auto}
+    .sgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:18px}
+    .sc{background:${C.card};border:1px solid ${C.border};border-radius:12px;padding:14px;transition:transform .2s}
+    .sc:hover{transform:translateY(-2px)}
+    .sc.g{border-left:3px solid ${C.accent}}.sc.r{border-left:3px solid ${C.red}}
+    .sc.y{border-left:3px solid ${C.yellow}}.sc.b{border-left:3px solid #4f8ef7}
+    .sc.p{border-left:3px solid #b47fff}.sc.t{border-left:3px solid #00c9d4}.sc.w{border-left:3px solid #ff9f43}
+    .slabel{font-size:9px;font-weight:700;letter-spacing:2px;color:${C.muted};text-transform:uppercase;margin-bottom:6px}
+    .sval{font-family:'DM Mono',monospace;font-size:15px;font-weight:500}
+    .ssub{font-size:10px;color:${C.muted};margin-top:3px;font-family:'DM Mono',monospace}
+    .fbar{display:flex;align-items:center;gap:8px;background:${C.surface};border:1px solid ${C.border};border-radius:10px;padding:12px 16px;margin-bottom:16px;flex-wrap:wrap}
+    .fbar label{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:${C.muted}}
+    .fseg{display:flex;gap:3px}
+    .fsb{padding:5px 10px;border-radius:6px;border:1px solid transparent;font-family:'Syne',sans-serif;font-weight:600;font-size:11px;cursor:pointer;transition:all .15s;color:${C.muted};background:transparent}
+    .fsb.active{background:${C.adim};color:${C.accent};border-color:#00e5a040}
+    .fsb:hover:not(.active){border-color:${C.border};color:${C.text}}
+    .fbar input,.fbar select{background:${C.card};border:1px solid ${C.border};border-radius:6px;padding:6px 9px;color:${C.text};font-family:'DM Mono',monospace;font-size:11px;outline:none}
+    .fbar input:focus,.fbar select:focus{border-color:${C.accent}}
+    .fbar select option{background:${C.card}}
+    .tabs{display:flex;gap:3px;margin-bottom:16px;flex-wrap:wrap}
+    .tab{padding:7px 14px;border-radius:7px;border:1px solid transparent;font-family:'Syne',sans-serif;font-weight:600;font-size:11px;cursor:pointer;transition:all .15s;color:${C.muted};background:transparent}
+    .tab.active{background:${C.adim};color:${C.accent};border-color:#00e5a040}
+    .tab:hover:not(.active){color:${C.text};border-color:${C.border}}
+    .panel{background:${C.card};border:1px solid ${C.border};border-radius:14px;padding:20px;margin-bottom:16px}
+    .ptitle{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:${C.muted};margin-bottom:14px;display:flex;align-items:center;gap:7px}
+    .pdot{width:5px;height:5px;border-radius:50%;background:${C.accent};flex-shrink:0;display:inline-block}
+    .cgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .uzone{border:2px dashed ${C.border};border-radius:10px;padding:24px 16px;text-align:center;cursor:pointer;transition:all .2s;position:relative}
+    .uzone:hover,.uzone.drag{border-color:${C.accent};background:${C.adim}}
+    .uzone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+    .utitle{font-size:13px;font-weight:700;color:${C.white};margin-bottom:3px}
+    .usub{font-size:11px;color:${C.muted}}
+    .fprev{display:flex;align-items:center;gap:8px;background:${C.surface};border-radius:7px;padding:8px 12px;margin-top:10px;border:1px solid ${C.border}}
+    .fprev-name{font-size:11px;font-family:'DM Mono',monospace;color:${C.text};flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .frem{cursor:pointer;color:${C.muted};font-size:16px;line-height:1;background:none;border:none}
+    .frem:hover{color:${C.red}}
+    .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:8px;border:none;cursor:pointer;font-family:'Syne',sans-serif;font-weight:700;font-size:12px;transition:all .2s}
+    .btn-p{background:${C.accent};color:#000}.btn-p:hover{background:#00ffb3;transform:translateY(-1px)}
+    .btn-p:disabled{opacity:.4;cursor:not-allowed;transform:none}
+    .btn-g{background:transparent;color:${C.muted};border:1px solid ${C.border}}
+    .btn-g:hover{border-color:${C.accent};color:${C.accent}}
+    .btn-d{background:transparent;color:${C.red};border:1px solid #ff4d6d30}
+    .btn-d:hover{background:${C.rdim}}
+    .aibox{background:${C.surface};border:1px solid ${C.border};border-radius:10px;padding:12px;margin-top:12px;font-family:'DM Mono',monospace;font-size:11px;line-height:1.7;color:${C.text};max-height:200px;overflow-y:auto;white-space:pre-wrap}
+    .lbar{height:3px;background:${C.border};border-radius:2px;margin-top:10px;overflow:hidden}
+    .lbar-i{height:100%;background:${C.accent};border-radius:2px;animation:ld 1.5s ease-in-out infinite;width:40%}
+    @keyframes ld{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
+    .twrap{overflow-x:auto;margin-top:8px}
+    table{width:100%;border-collapse:collapse;font-size:11px}
+    th{text-align:left;padding:8px 10px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:${C.muted};border-bottom:1px solid ${C.border};font-weight:600}
+    td{padding:9px 10px;border-bottom:1px solid #2a2f4518;font-family:'DM Mono',monospace;vertical-align:middle}
+    tr:hover td{background:${C.surface}}
+    tr:last-child td{border-bottom:none}
+    .tag{display:inline-block;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase}
+    .tag-entrada{background:${C.adim};color:${C.accent}}
+    .tag-saida{background:${C.rdim};color:${C.red}}
+    .tag-conciliado{background:#4f8ef720;color:#4f8ef7}
+    .tag-pendente{background:#ffd16620;color:${C.yellow}}
+    .crow td:first-child{border-left:3px solid ${C.accent};padding-left:7px}
+    .urow td:first-child{border-left:3px solid ${C.yellow};padding-left:7px}
+    .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .field{display:flex;flex-direction:column;gap:5px}
+    .field.full{grid-column:1/-1}
+    .field label{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:${C.muted}}
+    .field input,.field select,.field textarea{background:${C.surface};border:1px solid ${C.border};border-radius:7px;padding:8px 10px;color:${C.text};font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border-color .15s}
+    .field input:focus,.field select:focus,.field textarea:focus{border-color:${C.accent}}
+    .field select option{background:${C.card}}
+    .field textarea{resize:vertical;min-height:60px}
+    .ttog{display:flex;gap:7px}
+    .tbtn{flex:1;padding:8px;border-radius:7px;border:1px solid ${C.border};cursor:pointer;font-family:'Syne',sans-serif;font-weight:700;font-size:12px;transition:all .15s;background:transparent;color:${C.muted}}
+    .tbtn.entrada.active{background:${C.adim};color:${C.accent};border-color:${C.accent}}
+    .tbtn.saida.active{background:${C.rdim};color:${C.red};border-color:${C.red}}
+    .fgrid-f{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+    .fbtn{padding:6px 4px;border-radius:6px;border:1px solid ${C.border};cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:10px;transition:all .15s;background:transparent;color:${C.muted};text-align:center}
+    .fbtn.active{background:${C.adim};color:${C.accent};border-color:${C.accent}}
+    .ssetup{background:${C.surface};border:1px solid ${C.border};border-radius:10px;padding:16px;margin-bottom:16px}
+    .empty{text-align:center;padding:32px 16px;color:${C.muted};font-size:13px}
+    .eicon{font-size:32px;margin-bottom:8px}
+    @media(max-width:900px){.sgrid{grid-template-columns:repeat(4,1fr)}}
+    @media(max-width:600px){.sgrid{grid-template-columns:repeat(2,1fr)}.cgrid{grid-template-columns:1fr}.fgrid{grid-template-columns:1fr}.field.full{grid-column:1}.fgrid-f{grid-template-columns:repeat(2,1fr)}}
+  `;
+  const styleEl = document.createElement('style');
+  styleEl.textContent = css;
+  document.head.appendChild(styleEl);
+
+  // ── Helpers ──
+  async function callAI(apiKey, messages, system) {
+    const r = await fetch('/.netlify/functions/proxy', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey
+      },
+      body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:1500, system, messages})
+    });
+    let d;
+    try { d = await r.json(); } catch(e) {
+      const txt = await r.text().catch(()=>'');
+      throw new Error('Resposta inválida do servidor: ' + (txt||r.status));
+    }
+    if(!r.ok) throw new Error(d?.error?.message||'HTTP '+r.status);
+    return d.content.map(b=>b.text||'').join('');
+  }
+
+  async function pdfToText(file) {
+    if(!window.pdfjsLib) throw new Error('PDF.js não carregado');
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+    let txt = '';
+    for(let i=1;i<=Math.min(pdf.numPages,4);i++){
+      const pg = await pdf.getPage(i);
+      const tc = await pg.getTextContent();
+      txt += tc.items.map(t=>t.str).join(' ')+'\n';
+    }
+    return txt.trim().slice(0,6000);
+  }
+
+  async function fileToB64(file) {
+    return new Promise(res=>{const r=new FileReader();r.onload=ev=>res(ev.target.result.split(',')[1]);r.readAsDataURL(file);});
+  }
+
+  function getMime(file) {
+    const ext=file.name.split('.').pop().toLowerCase();
+    const map={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',pdf:'application/pdf'};
+    return(file.type&&file.type!=='application/octet-stream')?file.type:(map[ext]||'image/jpeg');
+  }
+
+  function parseJSON(raw) {
+    try{return JSON.parse(raw.replace(/```json|```/g,'').trim());}
+    catch{const m=raw.match(/\{[\s\S]*\}/);if(m)try{return JSON.parse(m[0]);}catch{}return null;}
+  }
+
+  function reconcile(lancs,ext) {
+    const r=lancs.map(l=>({...l,status:'pendente',extratoRef:null}));
+    const used=new Set();
+    r.forEach(l=>{
+      const idx=ext.findIndex((ex,i)=>{
+        if(used.has(i))return false;
+        const ok=(l.tipo==='entrada'&&ex.valor>0)||(l.tipo==='saida'&&ex.valor<0);
+        const v=Math.abs(Math.abs(ex.valor)-Math.abs(l.valor))<1;
+        const dd=l.data&&ex.data?Math.abs(new Date(l.data)-new Date(ex.data))/86400000:5;
+        return ok&&v&&dd<=3;
+      });
+      if(idx>=0){l.status='conciliado';l.extratoRef=ext[idx].descricao;used.add(idx);}
+    });
+    return{lancamentos:r,naoAssociados:ext.filter((_,i)=>!used.has(i))};
+  }
+
+  // ── SVG Bar Chart (sem Recharts) ──
+  function BarChartSVG({data}) {
+    if(!data||data.length===0) return e('div',{className:'empty'},e('div',{className:'eicon'},'📊'),'Adicione lançamentos para ver o gráfico');
+    const W=600,H=200,PL=60,PR=20,PT=10,PB=40;
+    const iW=W-PL-PR, iH=H-PT-PB;
+    const maxVal=Math.max(...data.flatMap(d=>[d.entradas,d.saidas]),1);
+    const bW=Math.min(30,(iW/data.length/2)-4);
+    const yTicks=[0,0.25,0.5,0.75,1].map(f=>({v:maxVal*f,y:PT+iH*(1-f)}));
+    return e('div',{style:{overflowX:'auto'}},
+      e('svg',{viewBox:`0 0 ${W} ${H}`,style:{width:'100%',maxWidth:W,display:'block'}},
+        // grid lines
+        ...yTicks.map(t=>e('line',{key:'g'+t.v,x1:PL,y1:t.y,x2:W-PR,y2:t.y,stroke:'#2a2f45',strokeWidth:1,strokeDasharray:'4 4'})),
+        // y labels
+        ...yTicks.map(t=>e('text',{key:'y'+t.v,x:PL-6,y:t.y+4,textAnchor:'end',fill:'#6b7280',fontSize:9,fontFamily:'DM Mono'},
+          t.v>=1000?(t.v/1000).toFixed(0)+'k':t.v.toFixed(0)
+        )),
+        // bars
+        ...data.map((d,i)=>{
+          const x=PL+(iW/data.length)*i+(iW/data.length-bW*2-4)/2;
+          const hE=d.entradas/maxVal*iH, hS=d.saidas/maxVal*iH;
+          return e('g',{key:i},
+            e('rect',{x,y:PT+iH-hE,width:bW,height:hE,fill:'#00e5a0',rx:2}),
+            e('rect',{x:x+bW+4,y:PT+iH-hS,width:bW,height:hS,fill:'#ff4d6d',rx:2}),
+            e('text',{x:x+bW+2,y:H-PB+14,textAnchor:'middle',fill:'#6b7280',fontSize:8,fontFamily:'DM Mono'},d.mes)
+          );
+        }),
+        // axis
+        e('line',{x1:PL,y1:PT,x2:PL,y2:H-PB,stroke:'#2a2f45',strokeWidth:1}),
+        e('line',{x1:PL,y1:H-PB,x2:W-PR,y2:H-PB,stroke:'#2a2f45',strokeWidth:1}),
+        // legend
+        e('rect',{x:PL,y:H-15,width:8,height:8,fill:'#00e5a0',rx:2}),
+        e('text',{x:PL+12,y:H-8,fill:'#6b7280',fontSize:9,fontFamily:'DM Mono'},'Entradas'),
+        e('rect',{x:PL+80,y:H-15,width:8,height:8,fill:'#ff4d6d',rx:2}),
+        e('text',{x:PL+92,y:H-8,fill:'#6b7280',fontSize:9,fontFamily:'DM Mono'},'Saídas')
+      )
+    );
+  }
+
+  // ── API Key Screen ──
+  function ApiKeyScreen({onSave}) {
+    const [key,setKey]=useState('');
+    const [err,setErr]=useState('');
+    const [loading,setLoading]=useState(false);
+    const test=async()=>{
+      if(!key.trim()){setErr('Digite a chave.');return;}
+      setLoading(true);setErr('');
+      try{
+        await callAI(key.trim(),[{role:'user',content:'ok'}],'Responda apenas: ok');
+        onSave(key.trim());
+      }catch(ex){setErr('Chave inválida: '+ex.message);}
+      setLoading(false);
+    };
+    return e('div',{className:'apiscreen'},
+      e('div',{className:'apicard'},
+        e('h1',null,'fluxo',e('span',null,'.ai')),
+        e('p',null,'Insira sua chave da API Anthropic. Ela fica salva só no seu navegador.'),
+        e('input',{type:'password',placeholder:'sk-ant-...',value:key,
+          onChange:ev=>setKey(ev.target.value),onKeyDown:ev=>ev.key==='Enter'&&test()}),
+        err&&e('div',{style:{color:C.red,fontSize:12,marginBottom:8,fontFamily:'monospace',textAlign:'left'}},err),
+        e('button',{className:'btn btn-p',onClick:test,disabled:loading||!key,style:{width:'100%'}},
+          loading?'⏳ Verificando...':'🔑 Entrar'),
+        e('div',{className:'hint'},
+          'Obtenha sua chave em ',e('a',{href:'https://console.anthropic.com/',target:'_blank'},'console.anthropic.com'),
+          e('br'),'Custo estimado: US$ 1–3/mês para uso normal.'
+        )
+      )
+    );
+  }
+
+  // ── Manual Form ──
+  function ManualForm({onAdd}) {
+    const [f,setF]=useState(EFORM);
+    const s=(k,v)=>setF(p=>({...p,[k]:v}));
+    const submit=()=>{
+      if(!f.descricao||!f.valor)return;
+      const val=parseFloat(f.valor.replace(',','.'));
+      if(isNaN(val)||val<=0)return;
+      onAdd({...f,valor:val,id:Date.now(),origem:'manual',status:'pendente',extratoRef:null,emitente:f.emitente||'Manual'});
+      setF({...EFORM,data:today()});
+    };
+    return e('div',null,
+      e('div',{className:'ttog',style:{marginBottom:12}},
+        e('button',{className:`tbtn entrada ${f.tipo==='entrada'?'active':''}`,onClick:()=>s('tipo','entrada')},'📥 Entrada'),
+        e('button',{className:`tbtn saida ${f.tipo==='saida'?'active':''}`,onClick:()=>s('tipo','saida')},'📤 Saída')
+      ),
+      e('div',{className:'fgrid',style:{marginBottom:12}},
+        e('div',{className:'field'},e('label',null,'Data'),e('input',{type:'date',value:f.data,onChange:ev=>s('data',ev.target.value)})),
+        e('div',{className:'field'},e('label',null,'Valor (R$)'),e('input',{type:'text',placeholder:'0,00',value:f.valor,onChange:ev=>s('valor',ev.target.value)})),
+        e('div',{className:'field full'},e('label',null,'Descrição *'),e('input',{type:'text',placeholder:'Venda, pagamento...',value:f.descricao,onChange:ev=>s('descricao',ev.target.value)})),
+        e('div',{className:'field'},e('label',null,'Emitente / Cliente'),e('input',{type:'text',placeholder:'Nome',value:f.emitente,onChange:ev=>s('emitente',ev.target.value)})),
+        e('div',{className:'field'},e('label',null,'NF / Doc Nº'),e('input',{type:'text',placeholder:'Opcional',value:f.numeroNF,onChange:ev=>s('numeroNF',ev.target.value)}))
+      ),
+      e('div',{style:{marginBottom:12}},
+        e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'1.5px',textTransform:'uppercase',color:C.muted,marginBottom:6}},'Forma de Pagamento'),
+        e('div',{className:'fgrid-f'},FORMAS.map(fm=>e('button',{key:fm.v,className:`fbtn ${f.forma===fm.v?'active':''}`,onClick:()=>s('forma',fm.v)},fm.l)))
+      ),
+      e('div',{className:'field',style:{marginBottom:12}},e('label',null,'Comentário'),e('textarea',{placeholder:'Observações...',value:f.obs,onChange:ev=>s('obs',ev.target.value)})),
+      e('button',{className:'btn btn-p',onClick:submit,disabled:!f.descricao||!f.valor,style:{width:'100%'}},'✚ Adicionar Lançamento')
+    );
+  }
+
+  // ── Main App ──
+  function App() {
+    const [apiKey,setApiKey]=useState(()=>localStorage.getItem('fluxo_key')||'');
+    const [tab,setTab]=useState('dashboard');
+    const [lancs,setLancs]=useState(()=>{try{return JSON.parse(localStorage.getItem('fluxo_lancs')||'[]');}catch{return[];}});
+    const [extrato,setExtrato]=useState([]);
+    const [naoAssoc,setNaoAssoc]=useState([]);
+    const [nfFile,setNfFile]=useState(null);
+    const [nfForma,setNfForma]=useState('pix');
+    const [loadNF,setLoadNF]=useState(false);
+    const [nfRes,setNfRes]=useState('');
+    const [dragNF,setDragNF]=useState(false);
+    const [exFile,setExFile]=useState(null);
+    const [loadEx,setLoadEx]=useState(false);
+    const [exRes,setExRes]=useState('');
+    const [dragEx,setDragEx]=useState(false);
+    const [saldoBStr,setSaldoBStr]=useState(()=>localStorage.getItem('fluxo_sb')||'');
+    const [saldoCStr,setSaldoCStr]=useState(()=>localStorage.getItem('fluxo_sc')||'');
+    const [saldoSalvo,setSaldoSalvo]=useState(()=>!!localStorage.getItem('fluxo_sb'));
+    const [saldoB0,setSaldoB0]=useState(()=>parseFloat(localStorage.getItem('fluxo_sb')||'0')||0);
+    const [saldoC0,setSaldoC0]=useState(()=>parseFloat(localStorage.getItem('fluxo_sc')||'0')||0);
+    const [editCom,setEditCom]=useState(null);
+    const [comTemp,setComTemp]=useState('');
+    const [fTipo,setFTipo]=useState('tudo');
+    const [fAno,setFAno]=useState(new Date().getFullYear());
+    const [fMes,setFMes]=useState(0);
+    const [fDE,setFDE]=useState('');
+    const [fATE,setFATE]=useState('');
+
+    useEffect(()=>{localStorage.setItem('fluxo_lancs',JSON.stringify(lancs));},[lancs]);
+    const saveKey=k=>{localStorage.setItem('fluxo_key',k);setApiKey(k);};
+    if(!apiKey) return e(ApiKeyScreen,{onSave:saveKey});
+
+    const lf=lancs.filter(l=>{
+      if(fTipo==='tudo')return true;
+      if(!l.data)return false;
+      const d=new Date(l.data+'T12:00:00');
+      if(fTipo==='mesano'){if(d.getFullYear()!==Number(fAno))return false;if(fMes!==0&&d.getMonth()+1!==Number(fMes))return false;return true;}
+      if(fTipo==='intervalo'){if(fDE&&d<new Date(fDE+'T00:00:00'))return false;if(fATE&&d>new Date(fATE+'T23:59:59'))return false;return true;}
+      return true;
+    });
+    const tE=lf.filter(l=>l.tipo==='entrada').reduce((s,l)=>s+l.valor,0);
+    const tS=lf.filter(l=>l.tipo==='saida').reduce((s,l)=>s+l.valor,0);
+    const sMov=tE-tS;
+    const sBanco=saldoB0+lancs.filter(l=>['pix','debito','credito','transferencia'].includes(l.forma)).reduce((s,l)=>s+(l.tipo==='entrada'?l.valor:-l.valor),0);
+    const sCaixa=saldoC0+lancs.filter(l=>l.forma==='dinheiro').reduce((s,l)=>s+(l.tipo==='entrada'?l.valor:-l.valor),0);
+    const sTotal=sBanco+sCaixa;
+    const nConc=lf.filter(l=>l.status==='conciliado').length;
+    const anos=[...new Set(lancs.map(l=>l.data?.slice(0,4)).filter(Boolean))].sort().reverse();
+    if(!anos.includes(String(new Date().getFullYear())))anos.unshift(String(new Date().getFullYear()));
+
+    const addLanc=novo=>{
+      const all=[...lancs,novo];
+      if(extrato.length>0){const{lancamentos:r,naoAssociados:na}=reconcile(all,extrato);setLancs(r);setNaoAssoc(na);}
+      else setLancs(all);
+    };
+    const salvarSaldo=()=>{
+      const b=parseFloat(saldoBStr.replace(',','.'))||0;
+      const c=parseFloat(saldoCStr.replace(',','.'))||0;
+      setSaldoB0(b);setSaldoC0(c);
+      localStorage.setItem('fluxo_sb',String(b));
+      localStorage.setItem('fluxo_sc',String(c));
+      setSaldoSalvo(true);
+    };
+
+    const processarNF=async()=>{
+      if(!nfFile)return;
+      setLoadNF(true);setNfRes('⏳ Lendo arquivo...');
+      try{
+        const mime=getMime(nfFile);
+        const isPDF=mime==='application/pdf';
+        const isImg=mime.startsWith('image/');
+        if(!isPDF&&!isImg){setNfRes('Use JPG, PNG ou PDF.');setLoadNF(false);return;}
+        const sys=`Extrator de notas fiscais brasileiras. Retorne APENAS JSON válido sem markdown:
+{"tipo":"entrada ou saida","valor":número,"data":"YYYY-MM-DD","emitente":"nome","destinatario":"nome","numero_nf":"número","descricao":"produtos/serviços","cnpj_emitente":"CNPJ"}
+Campos ausentes: null.`;
+        let msgs;
+        if(isPDF){
+          setNfRes('⏳ Extraindo texto do PDF...');
+          const txt=await pdfToText(nfFile);
+          msgs=[{role:'user',content:`Analise esta nota fiscal e extraia os dados em JSON:\n\n${txt}`}];
+        } else {
+          setNfRes('⏳ Enviando imagem...');
+          const b64=await fileToB64(nfFile);
+          msgs=[{role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:b64}},{type:'text',text:'Analise esta nota fiscal e extraia os dados em JSON.'}]}];
+        }
+        setNfRes('⏳ Analisando com IA...');
+        const raw=await callAI(apiKey,msgs,sys);
+        const p=parseJSON(raw);
+        if(!p){setNfRes('Não foi possível extrair.\n\n'+raw);setLoadNF(false);return;}
+        addLanc({id:Date.now(),tipo:p.tipo||'saida',valor:p.valor||0,data:p.data||null,
+          descricao:p.descricao||p.emitente||'Nota Fiscal',emitente:p.emitente||'—',
+          numeroNF:p.numero_nf||'—',forma:nfForma,origem:'NF',status:'pendente',extratoRef:null,obs:''});
+        setNfRes(`✅ NF processada!\n\nTipo: ${p.tipo==='entrada'?'📥 Entrada':'📤 Saída'}\nValor: ${fmt(p.valor)}\nData: ${fmtD(p.data)}\nEmitente: ${p.emitente||'—'}\nNF Nº: ${p.numero_nf||'—'}\nDescrição: ${p.descricao||'—'}\nForma: ${FL[nfForma]}`);
+        setNfFile(null);
+      }catch(ex){setNfRes('❌ Erro: '+ex.message);}
+      setLoadNF(false);
+    };
+
+    const processarExtrato=async()=>{
+      if(!exFile)return;
+      setLoadEx(true);setExRes('⏳ Lendo arquivo...');
+      try{
+        const mime=getMime(exFile);
+        const isPDF=mime==='application/pdf';
+        const isImg=mime.startsWith('image/');
+        if(!isPDF&&!isImg){setExRes('Use PDF ou imagem.');setLoadEx(false);return;}
+        const sys=`Extrator de extratos bancários brasileiros. Retorne APENAS JSON válido sem markdown:
+{"lancamentos":[{"data":"YYYY-MM-DD","descricao":"texto","valor":número positivo=crédito negativo=débito,"saldo":número ou null}]}`;
+        let msgs;
+        if(isPDF){
+          const txt=await pdfToText(exFile);
+          msgs=[{role:'user',content:`Extraia todos os lançamentos deste extrato em JSON:\n\n${txt}`}];
+        } else {
+          setExRes('⏳ Enviando imagem...');
+          const b64=await fileToB64(exFile);
+          msgs=[{role:'user',content:[{type:'image',source:{type:'base64',media_type:mime,data:b64}},{type:'text',text:'Extraia todos os lançamentos deste extrato em JSON.'}]}];
+        }
+        setExRes('⏳ Analisando com IA...');
+        const raw=await callAI(apiKey,msgs,sys);
+        const p=parseJSON(raw);
+        if(!p||!p.lancamentos){setExRes('Não foi possível extrair.\n\n'+raw);setLoadEx(false);return;}
+        const novExt=p.lancamentos;
+        setExtrato(novExt);
+        if(lancs.length>0){const{lancamentos:r,naoAssociados:na}=reconcile(lancs,novExt);setLancs(r);setNaoAssoc(na);}
+        setExRes(`✅ Extrato processado!\n\n${novExt.length} lançamentos importados.\nPeríodo: ${fmtD(novExt[0]?.data)} a ${fmtD(novExt[novExt.length-1]?.data)}`);
+        setExFile(null);
+      }catch(ex){setExRes('❌ Erro: '+ex.message);}
+      setLoadEx(false);
+    };
+
+    const chartData=useMemo(()=>{
+      const m={};
+      lf.forEach(l=>{const k=l.data?l.data.slice(0,7):'s/d';if(!m[k])m[k]={mes:k,entradas:0,saidas:0};if(l.tipo==='entrada')m[k].entradas+=l.valor;else m[k].saidas+=l.valor;});
+      return Object.values(m).sort((a,b)=>a.mes.localeCompare(b.mes));
+    },[lf]);
+
+    const SC=({cls,label,val,color,sub})=>e('div',{className:`sc ${cls}`},
+      e('div',{className:'slabel'},label),e('div',{className:'sval',style:{color}},val),e('div',{className:'ssub'},sub));
+
+    const pLabel=fTipo==='tudo'?`Todos (${lancs.length})`:fTipo==='mesano'?(fMes===0?`Ano ${fAno}`:`${MESES[fMes-1]}/${fAno}`):(fDE||fATE)?`${fDE?fmtD(fDE):'início'}→${fATE?fmtD(fATE):'hoje'}`:'Intervalo';
+
+    return e('div',{style:{minHeight:'100vh',background:C.bg}},
+      e('div',{className:'topbar'},
+        e('div',{className:'logo'},'fluxo',e('span',null,'.ai')),
+        e('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+          e('span',{style:{fontSize:10,color:C.muted,fontFamily:'monospace'}},pLabel),
+          e('div',{className:'badge'},'IA'),
+          e('button',{className:'btn btn-g',style:{fontSize:10,padding:'4px 8px'},
+            onClick:()=>{localStorage.removeItem('fluxo_key');setApiKey('');}},'🔑 Trocar chave')
+        )
+      ),
+      e('div',{className:'main'},
+        !saldoSalvo&&e('div',{className:'ssetup'},
+          e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'2px',textTransform:'uppercase',color:C.muted,marginBottom:10}},'⚙️ Saldo Inicial'),
+          e('div',{className:'fgrid'},
+            e('div',{className:'field'},e('label',null,'🏦 Banco (R$)'),e('input',{type:'text',placeholder:'0,00',value:saldoBStr,onChange:ev=>setSaldoBStr(ev.target.value)})),
+            e('div',{className:'field'},e('label',null,'💵 Caixa (R$)'),e('input',{type:'text',placeholder:'0,00',value:saldoCStr,onChange:ev=>setSaldoCStr(ev.target.value)}))
+          ),
+          e('div',{style:{marginTop:10,display:'flex',gap:7}},
+            e('button',{className:'btn btn-p',onClick:salvarSaldo},'Salvar'),
+            e('button',{className:'btn btn-g',onClick:()=>setSaldoSalvo(true)},'Pular')
+          )
+        ),
+        e('div',{className:'fbar'},
+          e('label',null,'Período'),
+          e('div',{className:'fseg'},[['tudo','Tudo'],['mesano','Mês/Ano'],['intervalo','De–Até']].map(([v,l])=>
+            e('button',{key:v,className:`fsb ${fTipo===v?'active':''}`,onClick:()=>setFTipo(v)},l)
+          )),
+          fTipo==='mesano'&&e(React.Fragment,null,
+            e('select',{value:fMes,onChange:ev=>setFMes(Number(ev.target.value))},e('option',{value:0},'Todos'),MESES.map((m,i)=>e('option',{key:i,value:i+1},m))),
+            e('select',{value:fAno,onChange:ev=>setFAno(Number(ev.target.value))},anos.map(a=>e('option',{key:a,value:a},a)))
+          ),
+          fTipo==='intervalo'&&e(React.Fragment,null,
+            e('label',null,'De'),e('input',{type:'date',value:fDE,onChange:ev=>setFDE(ev.target.value)}),
+            e('label',null,'Até'),e('input',{type:'date',value:fATE,onChange:ev=>setFATE(ev.target.value)})
+          )
+        ),
+        e('div',{className:'sgrid'},
+          e(SC,{cls:'g',label:'Entradas',val:fmt(tE),color:C.accent,sub:`${lf.filter(l=>l.tipo==='entrada').length} itens`}),
+          e(SC,{cls:'r',label:'Saídas',val:fmt(tS),color:C.red,sub:`${lf.filter(l=>l.tipo==='saida').length} itens`}),
+          e(SC,{cls:'y',label:'Saldo Período',val:fmt(sMov),color:sMov>=0?C.accent:C.red,sub:sMov>=0?'positivo':'negativo'}),
+          e(SC,{cls:'t',label:'Saldo Banco',val:fmt(sBanco),color:'#00c9d4',sub:`ini: ${fmt(saldoB0)}`}),
+          e(SC,{cls:'p',label:'Saldo Caixa',val:fmt(sCaixa),color:'#b47fff',sub:`ini: ${fmt(saldoC0)}`}),
+          e(SC,{cls:'w',label:'Saldo Total',val:fmt(sTotal),color:'#ff9f43',sub:'banco+caixa'}),
+          e(SC,{cls:'b',label:'Conciliados',val:`${lf.length>0?Math.round(nConc/lf.length*100):0}%`,color:'#4f8ef7',sub:`${nConc}/${lf.length}`})
+        ),
+        e('div',{className:'tabs'},[['dashboard','📊 Dashboard'],['manual','✏️ Manual'],['importar','📥 Importar'],['lancamentos','📋 Lançamentos'],['conciliacao','🔄 Conciliação']].map(([v,l])=>
+          e('button',{key:v,className:`tab ${tab===v?'active':''}`,onClick:()=>setTab(v)},l)
+        )),
+
+        tab==='dashboard'&&e('div',null,
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Entradas vs Saídas por Mês'),
+            e(BarChartSVG,{data:chartData})
+          ),
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Últimos Lançamentos'),
+            lf.length===0?e('div',{className:'empty'},e('div',{className:'eicon'},'📄'),'Nenhum lançamento no período')
+            :e('div',{className:'twrap'},e('table',null,
+                e('thead',null,e('tr',null,e('th',null,'Data'),e('th',null,'Descrição'),e('th',null,'Forma'),e('th',null,'Valor'),e('th',null,'Status'))),
+                e('tbody',null,[...lf].reverse().slice(0,8).map(l=>e('tr',{key:l.id},
+                  e('td',null,fmtD(l.data)),
+                  e('td',{style:{color:C.text,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},l.descricao),
+                  e('td',{style:{fontSize:10}},FL[l.forma]||'—'),
+                  e('td',{style:{color:l.tipo==='entrada'?C.accent:C.red}},(l.tipo==='entrada'?'+':'-')+fmt(l.valor)),
+                  e('td',null,e('span',{className:`tag tag-${l.status}`},l.status))
+                )))
+              ))
+          )
+        ),
+
+        tab==='manual'&&e('div',{className:'panel'},
+          e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Novo Lançamento Manual'),
+          e(ManualForm,{onAdd:addLanc})
+        ),
+
+        tab==='importar'&&e('div',{className:'cgrid'},
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Nota Fiscal'),
+            e('div',{className:`uzone ${dragNF?'drag':''}`,
+              onDragOver:ev=>{ev.preventDefault();setDragNF(true)},onDragLeave:()=>setDragNF(false),
+              onDrop:ev=>{ev.preventDefault();setDragNF(false);const f=ev.dataTransfer.files[0];if(f)setNfFile(f)}},
+              e('input',{type:'file',accept:'.pdf,.jpg,.jpeg,.png,image/*',onChange:ev=>{if(ev.target.files[0])setNfFile(ev.target.files[0]);ev.target.value='';}}),
+              e('div',{style:{fontSize:24,marginBottom:6}},'🧾'),
+              e('div',{className:'utitle'},'PDF ou foto da NF'),
+              e('div',{className:'usub'},'JPG, PNG, PDF aceitos')
+            ),
+            nfFile&&e('div',{className:'fprev'},
+              e('span',null,getMime(nfFile)==='application/pdf'?'📄':'🖼️'),
+              e('span',{className:'fprev-name'},nfFile.name),
+              e('button',{className:'frem',onClick:()=>setNfFile(null)},'×')
+            ),
+            e('div',{style:{marginTop:12,marginBottom:10}},
+              e('div',{style:{fontSize:9,fontWeight:700,letterSpacing:'1.5px',textTransform:'uppercase',color:C.muted,marginBottom:6}},'Forma de Pagamento'),
+              e('div',{className:'fgrid-f'},FORMAS.map(fm=>e('button',{key:fm.v,className:`fbtn ${nfForma===fm.v?'active':''}`,onClick:()=>setNfForma(fm.v)},fm.l)))
+            ),
+            e('button',{className:'btn btn-p',onClick:processarNF,disabled:!nfFile||loadNF,style:{width:'100%'}},loadNF?'⏳ Processando...':'🤖 Processar com IA'),
+            loadNF&&e('div',{className:'lbar'},e('div',{className:'lbar-i'})),
+            nfRes&&e('div',{className:'aibox'},nfRes)
+          ),
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot',style:{background:'#4f8ef7'}}),'Extrato Bancário'),
+            e('div',{className:`uzone ${dragEx?'drag':''}`,
+              onDragOver:ev=>{ev.preventDefault();setDragEx(true)},onDragLeave:()=>setDragEx(false),
+              onDrop:ev=>{ev.preventDefault();setDragEx(false);const f=ev.dataTransfer.files[0];if(f)setExFile(f)}},
+              e('input',{type:'file',accept:'.pdf,.jpg,.jpeg,.png,image/*',onChange:ev=>{if(ev.target.files[0])setExFile(ev.target.files[0]);ev.target.value='';}}),
+              e('div',{style:{fontSize:24,marginBottom:6}},'🏦'),
+              e('div',{className:'utitle'},'PDF ou foto do extrato'),
+              e('div',{className:'usub'},'PDF recomendado')
+            ),
+            exFile&&e('div',{className:'fprev'},
+              e('span',null,getMime(exFile)==='application/pdf'?'📄':'🖼️'),
+              e('span',{className:'fprev-name'},exFile.name),
+              e('button',{className:'frem',onClick:()=>setExFile(null)},'×')
+            ),
+            e('div',{style:{marginTop:12}},
+              e('button',{className:'btn btn-p',onClick:processarExtrato,disabled:!exFile||loadEx,style:{width:'100%'}},loadEx?'⏳ Processando...':'🤖 Processar com IA')
+            ),
+            loadEx&&e('div',{className:'lbar'},e('div',{className:'lbar-i'})),
+            exRes&&e('div',{className:'aibox'},exRes)
+          )
+        ),
+
+        tab==='lancamentos'&&e('div',{className:'panel'},
+          e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Lançamentos',e('span',{style:{marginLeft:'auto',fontWeight:400,fontSize:9}},`${lf.length} registros`)),
+          lf.length===0?e('div',{className:'empty'},e('div',{className:'eicon'},'📋'),'Nenhum lançamento no período.')
+          :e('div',{className:'twrap'},e('table',null,
+              e('thead',null,e('tr',null,e('th',null,'Data'),e('th',null,'NF'),e('th',null,'Emitente'),e('th',null,'Descrição'),e('th',null,'Forma'),e('th',null,'Tipo'),e('th',null,'Valor'),e('th',null,'Comentário'),e('th',null,'Status'),e('th',null,''))),
+              e('tbody',null,[...lf].reverse().map(l=>e('tr',{key:l.id,className:l.status==='conciliado'?'crow':''},
+                e('td',null,fmtD(l.data)),
+                e('td',{style:{color:C.muted}},l.numeroNF||'—'),
+                e('td',{style:{color:C.text,maxWidth:90,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},l.emitente),
+                e('td',{style:{color:C.text,maxWidth:130,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},l.descricao),
+                e('td',{style:{fontSize:9}},FL[l.forma]||'—'),
+                e('td',null,e('span',{className:`tag tag-${l.tipo}`},l.tipo)),
+                e('td',{style:{color:l.tipo==='entrada'?C.accent:C.red,fontWeight:600}},(l.tipo==='entrada'?'+':'-')+fmt(l.valor)),
+                e('td',{style:{minWidth:130}},
+                  editCom===l.id
+                    ?e('div',{style:{display:'flex',gap:4,alignItems:'center'}},
+                        e('input',{autoFocus:true,value:comTemp,onChange:ev=>setComTemp(ev.target.value),
+                          onKeyDown:ev=>{if(ev.key==='Enter'){setLancs(p=>p.map(x=>x.id===l.id?{...x,obs:comTemp}:x));setEditCom(null);}if(ev.key==='Escape')setEditCom(null);},
+                          style:{background:C.surface,border:`1px solid ${C.accent}`,borderRadius:5,padding:'3px 7px',color:C.text,fontFamily:'monospace',fontSize:10,width:'100%'}}),
+                        e('button',{className:'btn btn-p',style:{padding:'3px 6px',fontSize:10},onClick:()=>{setLancs(p=>p.map(x=>x.id===l.id?{...x,obs:comTemp}:x));setEditCom(null);}},'✓')
+                      )
+                    :e('div',{style:{display:'flex',alignItems:'center',gap:4,cursor:'pointer'},onClick:()=>{setEditCom(l.id);setComTemp(l.obs||'');}},
+                        e('span',{style:{color:l.obs?C.text:C.muted,fontSize:10,fontStyle:l.obs?'normal':'italic'}},l.obs||'Adicionar...'),
+                        e('span',{style:{fontSize:9}},'✏️')
+                      )
+                ),
+                e('td',null,e('span',{className:`tag tag-${l.status}`},l.status)),
+                e('td',null,e('button',{className:'btn btn-d',style:{padding:'2px 6px',fontSize:9},onClick:()=>setLancs(p=>p.filter(x=>x.id!==l.id))},'✕'))
+              )))
+            ))
+        ),
+
+        tab==='conciliacao'&&e('div',null,
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot'}),'Lançamentos Conciliados'),
+            lf.filter(l=>l.status==='conciliado').length===0
+              ?e('div',{className:'empty'},e('div',{className:'eicon'},'🔄'),extrato.length===0?'Importe um extrato para conciliar.':'Nenhum conciliado no período.')
+              :e('div',{className:'twrap'},e('table',null,
+                  e('thead',null,e('tr',null,e('th',null,'Data'),e('th',null,'Descrição'),e('th',null,'Forma'),e('th',null,'Valor'),e('th',null,'Match Extrato'))),
+                  e('tbody',null,lf.filter(l=>l.status==='conciliado').map(l=>e('tr',{key:l.id,className:'crow'},
+                    e('td',null,fmtD(l.data)),e('td',{style:{color:C.text}},l.descricao),
+                    e('td',{style:{fontSize:9}},FL[l.forma]||'—'),
+                    e('td',{style:{color:l.tipo==='entrada'?C.accent:C.red}},(l.tipo==='entrada'?'+':'-')+fmt(l.valor)),
+                    e('td',{style:{color:C.muted}},l.extratoRef)
+                  )))
+                ))
+          ),
+          e('div',{className:'panel'},
+            e('div',{className:'ptitle'},e('span',{className:'pdot',style:{background:C.yellow}}),'Extrato sem NF/Registro'),
+            naoAssoc.length===0
+              ?e('div',{className:'empty'},e('div',{className:'eicon'},extrato.length>0?'✅':'🏦'),extrato.length>0?'Tudo conciliado!':'Importe um extrato.')
+              :e('div',{className:'twrap'},e('table',null,
+                  e('thead',null,e('tr',null,e('th',null,'Data'),e('th',null,'Descrição'),e('th',null,'Valor'),e('th',null,'Ação'))),
+                  e('tbody',null,naoAssoc.map((ex,i)=>e('tr',{key:i,className:'urow'},
+                    e('td',null,fmtD(ex.data)),e('td',{style:{color:C.text}},ex.descricao),
+                    e('td',{style:{color:ex.valor>0?C.accent:C.red}},(ex.valor>0?'+':'')+fmt(ex.valor)),
+                    e('td',null,e('button',{className:'btn btn-g',style:{padding:'3px 8px',fontSize:10},
+                      onClick:()=>{const n={id:Date.now()+i,tipo:ex.valor>0?'entrada':'saida',valor:Math.abs(ex.valor),data:ex.data,descricao:ex.descricao,emitente:'Extrato',numeroNF:'—',forma:'transferencia',origem:'extrato',status:'conciliado',extratoRef:ex.descricao,obs:''};setLancs(p=>[...p,n]);setNaoAssoc(p=>p.filter((_,j)=>j!==i));}},'+ Adicionar'))
+                  )))
+                ))
+          )
+        ),
+
+        saldoSalvo&&e('div',{style:{marginTop:16,textAlign:'center'}},
+          e('button',{className:'btn btn-g',style:{fontSize:10},onClick:()=>setSaldoSalvo(false)},'✏️ Editar saldo inicial')
+        )
+      )
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+}
+
+boot();
+</script>
+</body>
+</html>
